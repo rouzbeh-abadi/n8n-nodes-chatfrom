@@ -18,7 +18,10 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/rouzbeh-abadi/n8n-nodes-chatfrom.git"
+		"url": "git+https://github.com/rouzbeh-abadi/n8n-nodes-chatfrom.git"
+	},
+	"publishConfig": {
+		"access": "public"
 	},
 	"scripts": {
 		"build": "n8n-node build",
