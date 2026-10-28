@@ -1,0 +1,66 @@
+# Publishes n8n-nodes-chatfrom to npm, with provenance, when a version tag such
+# as 0.1.0 is pushed. n8n asks community nodes to be published this way since
+# 1 May 2026: provenance shows the package was built here, from this commit.
+#
+# The package is written in ChatFrom's own repository and copied here for each
+# release, so the version and CHANGELOG.md are set there. Here, a release is:
+#
+#   git tag -a 0.1.0 -m 0.1.0 && git push origin main 0.1.0
+#
+# The tag must be package.json's version. `npm run release` runs only in
+# GitHub Actions; on a computer it refuses, since it would bump the version and
+# rewrite the changelog here.
+#
+# npm: the first version goes out with a granular access token saved as the
+# NPM_TOKEN secret (publish rights on all packages, since this one does not
+# exist yet, and "Bypass two-factor authentication" when the account asks for
+# 2FA). After that, the package's settings on npmjs.com get a trusted publisher
+# (this repository, publish.yml), added just before a release, since a new one
+# lapses unless it publishes within 2 days. Once it has, the secret and the
+# token are deleted. Trusted publishing needs npm 11.5.1 or later.
+
+name: Publish
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Mints the OIDC token for npm's provenance and trusted publishing.
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      - name: Check the tag is the package's version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          [ "$GITHUB_REF_NAME" = "$version" ] || { echo "The tag $GITHUB_REF_NAME is not package.json's version, $version." >&2; exit 1; }
+
+      - name: Update npm for trusted publishing
+        run: npm install -g npm@^11.5.1
+
+      # No install scripts in the job that can publish: lint and build need none.
+      - name: Install dependencies
+        run: 'npm ci --ignore-scripts'
+
+      - name: Release
+        # Lint, build, then npm publish with provenance (n8n-node release, run in CI).
+        run: |
+          [ -n "$NPM_TOKEN" ] && npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          npm run release
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

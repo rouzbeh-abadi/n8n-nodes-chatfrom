@@ -1,0 +1,18 @@
+{
+	"node": "n8n-nodes-chatfrom.chatFrom",
+	"nodeVersion": "1.0",
+	"codexVersion": "1.0",
+	"categories": ["Communication", "Productivity"],
+	"resources": {
+		"credentialDocumentation": [
+			{
+				"url": "https://github.com/rouzbeh-abadi/n8n-nodes-chatfrom#credentials"
+			}
+		],
+		"primaryDocumentation": [
+			{
+				"url": "https://github.com/rouzbeh-abadi/n8n-nodes-chatfrom#readme"
+			}
+		]
+	}
+}
