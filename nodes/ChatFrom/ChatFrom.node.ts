@@ -18,31 +18,31 @@ import {
 	sleep,
 } from 'n8n-workflow';
 import {
+	answerOf,
+	API,
 	ChatFromError,
-	ENDPOINT,
+	fromChatFrom,
 	InputError,
 	itemsFrom,
 	listOfPages,
 	MAY_STILL_FINISH,
 	ORIGIN,
 	OUTSIDERS,
-	rpc,
+	requestFor,
 	simplified,
-	toolFor,
-	toolResult,
 	withOneRetry,
+	type ApiRequest,
 	type Fields,
-	type ToolCall,
 } from './client';
 import { properties } from './fields';
 
-// Each operation is one call to ChatFrom's agent endpoint, which answers every
-// tool through one JSON-RPC address with the tool's JSON inside the reply, so
-// the node reads replies itself (client.ts) rather than routing requests
-// declaratively.
+// Each operation is one request to ChatFrom's REST API (client.ts). The node is
+// written out rather than declarative: an answer comes as a stream that is read
+// whole, Add Pages reads page addresses out of free text and answers the
+// entries it cannot send in their places, and a refusal that names its wait is
+// asked once more.
 
-/** What reads, indexes or answers can take ChatFrom up to two minutes; the rest answer in seconds. */
-const SLOW_TOOLS = new Set(['add_pages', 'add_text', 'add_qa', 'ask_chatbot']);
+/** Adding, indexing and answering (ApiRequest.slow) can take ChatFrom up to two minutes; the rest answer in seconds. */
 const SLOW_MS = 130_000;
 const CALL_MS = 30_000;
 
@@ -61,19 +61,33 @@ const OUTSIDERS_IN = new Set([
 /** n8n's codes for a request cut off before ChatFrom answered: it stopped waiting, or the connection broke. */
 const CUT_OFF = new Set(['ECONNABORTED', 'ETIMEDOUT', 'ECONNRESET']);
 
+/** What one request gave back: the API's answer, and for a chat, the conversation it went into. */
+interface Answered {
+	answer: unknown;
+	conversationId?: unknown;
+}
+
 async function callOnce(
 	this: IExecuteFunctions | ILoadOptionsFunctions,
-	call: ToolCall,
-): Promise<unknown> {
-	const slow = SLOW_TOOLS.has(call.name);
+	request: ApiRequest,
+): Promise<Answered> {
+	const slow = request.slow === true;
+	// A chat's answer streams: it is asked for as text and read whole (client.ts).
+	const streams = request.path === '/chat';
 	const options: IHttpRequestOptions = {
-		method: 'POST',
-		url: ENDPOINT,
-		body: rpc(call),
-		json: true,
+		method: request.method,
+		url: `${API}${request.path}`,
+		...(request.qs ? { qs: request.qs } : {}),
+		...(request.body === undefined
+			? {}
+			: streams
+				? { body: JSON.stringify(request.body), headers: { 'content-type': 'application/json' } }
+				: { body: request.body }),
+		json: !streams,
+		...(streams ? { encoding: 'text' as const } : {}),
 		returnFullResponse: true,
 		ignoreHttpStatusErrors: true,
-		// The endpoint never redirects: one that did would be followed with the key, to wherever it pointed.
+		// The API never redirects: one that did would be followed with the key, to wherever it pointed.
 		disableFollowRedirect: true,
 		sendCredentialsOnCrossOriginRedirect: false,
 		timeout: slow ? SLOW_MS : CALL_MS,
@@ -101,12 +115,17 @@ async function callOnce(
 		throw sent.error;
 	}
 	const { statusCode, body, headers } = sent.res;
-	if (slow && (statusCode === 502 || statusCode === 504)) throw mayStillFinish(String(statusCode));
-	return toolResult(statusCode, body, headers?.['retry-after']);
+	// The app's own 502 says what failed in its words; a gateway's, while a deploy replaces the app, says nothing of it.
+	if (slow && (statusCode === 502 || statusCode === 504) && !fromChatFrom(body))
+		throw mayStillFinish(String(statusCode));
+	return {
+		answer: answerOf(statusCode, body, headers?.['retry-after']),
+		conversationId: headers?.['x-conversation-id'],
+	};
 }
 
-/** A tool call, made once more after the wait ChatFrom names when it refused before doing anything (client.ts). */
-async function callTool(this: IExecuteFunctions, call: ToolCall): Promise<unknown> {
+/** A request, made once more after the wait ChatFrom names when it refused before doing anything (client.ts). */
+async function callApi(this: IExecuteFunctions, request: ApiRequest): Promise<Answered> {
 	// The wait ends when the run is stopped (an n8n too old to say so just waits), and then nothing more is sent.
 	const signal = this.getExecutionCancelSignal?.();
 	const pause = async (ms: number) => {
@@ -117,7 +136,7 @@ async function callTool(this: IExecuteFunctions, call: ToolCall): Promise<unknow
 				'The run was stopped before ChatFrom was asked again.',
 			);
 	};
-	return await withOneRetry(() => callOnce.call(this, call), pause);
+	return await withOneRetry(() => callOnce.call(this, request), pause);
 }
 
 /**
@@ -217,10 +236,10 @@ function itemsOf(
 	ctx: IExecuteFunctions,
 	op: string,
 	i: number,
-	call: ToolCall,
-	answer: unknown,
+	request: ApiRequest,
+	answered: Answered,
 ): IDataObject[] {
-	let items = itemsFrom(op, call, answer) as IDataObject[];
+	let items = itemsFrom(op, request, answered.answer, answered.conversationId) as IDataObject[];
 	if (op === 'chatbot.get' && ctx.getNodeParameter('simplify', i, true))
 		items = items.map((c) => simplified(c) as IDataObject);
 	if (op.endsWith('.getAll') && !ctx.getNodeParameter('returnAll', i, false))
@@ -239,8 +258,9 @@ async function listed(
 ): Promise<Record<string, unknown>[]> {
 	const [resource, operation] = op.split('.');
 	try {
-		const call = toolFor(resource, operation, fields);
-		return itemsFrom(op, call, await callOnce.call(ctx, call));
+		const request = requestFor(resource, operation, fields);
+		const answered = await callOnce.call(ctx, request);
+		return itemsFrom(op, request, answered.answer, answered.conversationId);
 	} catch (error) {
 		throw failure(ctx.getNode(), error);
 	}
@@ -342,9 +362,9 @@ export class ChatFrom implements INodeType {
 			try {
 				const resource = this.getNodeParameter('resource', i) as string;
 				const operation = this.getNodeParameter('operation', i) as string;
-				const call = toolFor(resource, operation, fieldsOf(this, resource, operation, i));
-				const answer = await callTool.call(this, call);
-				const data = itemsOf(this, `${resource}.${operation}`, i, call, answer);
+				const request = requestFor(resource, operation, fieldsOf(this, resource, operation, i));
+				const answered = await callApi.call(this, request);
+				const data = itemsOf(this, `${resource}.${operation}`, i, request, answered);
 				out.push(
 					...this.helpers.constructExecutionMetaData(this.helpers.returnJsonArray(data), {
 						itemData: { item: i },

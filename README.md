@@ -53,7 +53,7 @@ You need a ChatFrom account. The free plan is enough to try it.
 1. In ChatFrom, open **Account**, then **API keys**, and make a key for n8n alone. You can then delete it on its own if you ever need to.
 2. In n8n, create a **ChatFrom API** credential and paste the key. It starts with `cf_`.
 
-The key acts as you. It can read and change your chatbots, and what it asks and adds uses your plan's credits. Outside this node, it can also run evaluations, which are billed to the OpenRouter key you saved in ChatFrom, if you saved one. It cannot delete a chatbot, change your plan or make other keys. From n8n 2.24, only the ChatFrom node can use this credential, so an HTTP Request node cannot send the key somewhere else. On an older n8n, anyone who can use the credential in a workflow could do that, so share it only with people you trust.
+The key acts as you. In this node it reads your chatbots' settings, knowledge and conversations, adds and removes knowledge and asks your chatbots, and what it asks and adds uses your plan's credits. Through ChatFrom's endpoint for AI agents, the same key can also create chatbots, change their instructions and settings, put them live and run evaluations, which are billed to the OpenRouter key you saved in ChatFrom, if you saved one. It cannot delete a chatbot, change your plan or make other keys. It reads what your visitors wrote, an email address they gave included, but it cannot search conversations by email. It does not see your actions' and MCP servers' addresses, and it cannot import from Google Docs or Notion, though what you imported is part of the knowledge and the answers, and its questions use your chatbot's tools, such as Google Sheets or Shopify, as a visitor's would. From n8n 2.24, only the ChatFrom node can use this credential, so an HTTP Request node cannot send the key somewhere else. On an older n8n, anyone who can use the credential in a workflow could do that, so share it only with people you trust.
 
 ## Compatibility
 
@@ -62,7 +62,7 @@ Made with `@n8n/node-cli` 0.53. Tested with n8n 1.123, 2.0, 2.24 and 2.44.
 ## Usage
 
 - **Credits.** Asking a chatbot and adding knowledge use your plan's monthly credits, as they do in ChatFrom. A page added again that has not changed costs nothing.
-- **Asking as the owner.** Ask answers as you trying the chatbot out, so it works on a draft too. To go on with the same conversation, put the `conversation_id` of the last answer in **Options**, **Conversation ID**. When an answer carries a `question` (a step of the chatbot's workflow waiting for input), send the reply as the message, with that question's `thread_id` as **Thread ID** and the same Conversation ID.
+- **Asking as the owner.** Ask answers as you trying the chatbot out, so it works on a draft too. To go on with the same conversation, put the `conversation_id` of the last answer in **Options**, **Conversation ID**. Use one an earlier Ask gave, not a visitor's conversation from Get Many: your question would be added to it as if the visitor wrote it. When an answer carries a `question` (a step of the chatbot's workflow waiting for input), send the reply as the message, with that question's `thread_id` as **Thread ID** and the same Conversation ID.
 - **Pages.** Add Pages takes one address or several, each on its own line or after a comma or semicolon and a space, up to 60 per item. A comma inside an address keeps it whole, and an expression may give a list of addresses instead. It gives back one item per page, in the order given, with `ok`, the `doc_id` of each page stored (which Remove takes), and, for a page that could not be added, the `error`. An entry that is not a web address, such as a word split from a sentence, an e-mail address or a price, comes back as not added without being sent to ChatFrom; an item with no web address at all stops with an error, as an empty one does. A JSON list of addresses, as an AI agent may give, is read as one too, and a link as Slack or Markdown writes it gives its address. A list's numbers and bullets are left out. A page behind a sign-in cannot be added, because ChatFrom reads it from the open web.
 - **Limits.** ChatFrom limits how fast each plan may ask and add: 20 answers and 30 additions a minute on Hobby, 60 of each on Pro and 120 on Business, where one addition may hold up to 60 pages. Every account may also index up to 60 sources a minute and read 600 pages an hour, and one key may make 120 calls a minute in all. When ChatFrom refuses before doing anything and says to wait a minute or less (a limit reached, or a moment it could not sign in as you), the node waits and sends that item once more. Stopping the run ends the wait. For a large batch, put the node in a **Loop Over Items** with a **Wait** node rather than turning on **Retry On Fail**: Retry On Fail runs every item again, so questions already answered are asked, and counted, a second time.
 - **A wrong key.** When ChatFrom refuses the key, the node does not send the items after it. With **On Error** set to continue, each of them gets the same error.
@@ -79,8 +79,10 @@ Made with `@n8n/node-cli` 0.53. Tested with n8n 1.123, 2.0, 2.24 and 2.44.
 
 - [n8n community nodes documentation](https://docs.n8n.io/integrations/#community-nodes)
 - [ChatFrom documentation](https://chatfrom.io/docs)
-- [ChatFrom for AI agents](https://chatfrom.io/docs/agents), the API and MCP server this node calls
+- [ChatFrom's API reference](https://chatfrom.io/api/docs), the REST API this node calls with your API key
+- [ChatFrom for AI agents](https://chatfrom.io/docs/agents), where API keys are made
 
 ## Version history
 
+- **0.2.0**: calls ChatFrom's REST API rather than its MCP server, with the same operations, fields and output.
 - **0.1.0**: the first version, with the operations above.

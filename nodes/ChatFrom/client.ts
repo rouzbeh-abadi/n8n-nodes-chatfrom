@@ -1,15 +1,16 @@
-// ChatFrom's agent endpoint as this node calls it: the owner's API key, and one
-// MCP tool call per request (the endpoint keeps no session, so no `initialize`
-// comes first). Nothing here imports n8n, so ChatFrom's own tests run it
-// against the endpoint as it is.
+// ChatFrom's REST API as this node calls it (docs/api.md in ChatFrom, API keys
+// on the REST routes): the routes the dashboard itself calls, with the owner's
+// API key, one request per item, each answered as the dashboard is answered.
+// Nothing here imports n8n, so ChatFrom's own tests run it against those
+// routes as they are.
 
 export const ORIGIN = 'https://chatfrom.io';
-export const ENDPOINT = `${ORIGIN}/api/agent/mcp`;
+export const API = `${ORIGIN}/api`;
 
-/** The most pages one call adds (add_pages' maxItems): the tool refuses a call with more, so the node stops an item with more before sending it. */
+/** The most pages one request adds, as many as the route takes at once: the node stops an item with more before sending it, which the route would refuse whole. */
 export const PAGES_MAX = 60;
 
-/** The most conversations Get Many gives back (list_conversations): the newest, from the last 7 days unless Days says otherwise. */
+/** The most conversations Get Many gives back: the newest, from the last 7 days unless Days says otherwise. */
 export const CONVERSATIONS_MAX = 50;
 
 /** The longest wait the node sits out before asking again, when ChatFrom says how long to wait. */
@@ -86,9 +87,17 @@ export interface Fields {
 	handedOff?: boolean;
 }
 
-export interface ToolCall {
-	name: string;
-	arguments: Record<string, unknown>;
+/** One request to ChatFrom's API: its method, its path under /api, and what it sends. */
+export interface ApiRequest {
+	method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+	/** The path under /api, its ids encoded. */
+	path: string;
+	qs?: Record<string, string>;
+	body?: Record<string, unknown>;
+	/** It adds, indexes or answers, which can take ChatFrom up to two minutes. */
+	slow?: boolean;
+	/** Add Pages: the addresses sent, which come back one result each, in their order. */
+	pages?: string[];
 	/** Add Pages' entries that are not web addresses, by their place among all it was given: answered here, never sent. */
 	refused?: { at: number; url: string }[];
 }
@@ -307,39 +316,58 @@ const some = (values: string[]) => {
 /**
  * A field no call can be made without, by the name n8n shows it under. The
  * editor asks for each, but an expression may still give nothing, and
- * ChatFrom would name the tool's argument instead.
+ * ChatFrom would name the API's field instead.
  */
 const required = (value: string | undefined, field: string, hint: string): string => {
 	if (!value?.trim()) throw new InputError(`The '${field}' field is empty. ${hint}`);
 	return value;
 };
 
-const chatbotOf = (f: Fields) =>
-	required(f.chatbotId, 'Chatbot', 'Choose a chatbot from the list, or give its ID.');
+/**
+ * An ID as a part of a path. One made only of dots would name another path
+ * (`..` is the one above it, which encoding does not change), so it is no ID.
+ */
+const pathId = (value: string, field: string, hint: string) => {
+	if (/^\.+$/.test(value.trim())) throw new InputError(`The '${field}' field holds no ID. ${hint}`);
+	return encodeURIComponent(value);
+};
 
-/** A tool's arguments without the fields left empty. */
-const given = (args: Record<string, unknown>) =>
-	Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== ''));
+const CHOOSE_CHATBOT = 'Choose a chatbot from the list, or give its ID.';
 
-const tool = (name: string, args: Record<string, unknown> = {}): ToolCall => ({
-	name,
-	arguments: given(args),
-});
+const chatbotOf = (f: Fields) => required(f.chatbotId, 'Chatbot', CHOOSE_CHATBOT);
 
-/** Each of the node's operations, as `resource.operation`, and the tool call it makes. */
-const OPERATIONS: Record<string, (f: Fields) => ToolCall> = {
-	'chatbot.getAll': () => tool('list_chatbots'),
-	'chatbot.get': (f) => tool('get_chatbot', { chatbot_id: chatbotOf(f) }),
-	'chatbot.ask': (f) =>
-		tool('ask_chatbot', {
-			chatbot_id: chatbotOf(f),
-			message: required(f.message, 'Message', 'Give the question to ask the chatbot.'),
-			conversation_id: f.conversationId,
-			thread_id: f.threadId,
-		}),
-	'knowledge.getAll': (f) => tool('list_knowledge', { chatbot_id: chatbotOf(f) }),
+/** A chatbot's path under /api, and what comes after it. */
+const chatbotPath = (f: Fields, rest = '') =>
+	`/assistants/${pathId(chatbotOf(f), 'Chatbot', CHOOSE_CHATBOT)}${rest}`;
+
+/** A query's or a body's values without those left empty. */
+const given = <T>(values: Record<string, T | undefined>) =>
+	Object.fromEntries(
+		Object.entries(values).filter(([, v]) => v !== undefined && v !== ''),
+	) as Record<string, T>;
+
+/** A switch that is on, as the routes read one; nothing when it is off, which they read the same. */
+const flag = (on: boolean | undefined) => (on ? '1' : undefined);
+
+/** Each of the node's operations, as `resource.operation`, and the request it sends. */
+const OPERATIONS: Record<string, (f: Fields) => ApiRequest> = {
+	'chatbot.getAll': () => ({ method: 'GET', path: '/assistants' }),
+	'chatbot.get': (f) => ({ method: 'GET', path: chatbotPath(f) }),
+	'chatbot.ask': (f) => {
+		const assistantId = chatbotOf(f);
+		const message = required(f.message, 'Message', 'Give the question to ask the chatbot.');
+		// An answer to a workflow's question goes as words typed while it waited: if the question has passed, they are asked afresh.
+		const resume = f.threadId ? { threadId: f.threadId, value: message, typed: true } : undefined;
+		return {
+			method: 'POST',
+			path: '/chat',
+			body: given<unknown>({ assistantId, message, sessionId: f.conversationId, resume }),
+			slow: true,
+		};
+	},
+	'knowledge.getAll': (f) => ({ method: 'GET', path: chatbotPath(f, '/documents') }),
 	'knowledge.addPages': (f) => {
-		const chatbotId = chatbotOf(f);
+		const path = chatbotPath(f, '/sources');
 		const entries = addresses(f.urls);
 		if (!entries.length) {
 			// Empty, or only a list's marks.
@@ -368,95 +396,103 @@ const OPERATIONS: Record<string, (f: Fields) => ToolCall> = {
 			);
 		}
 		return {
-			...tool('add_pages', { chatbot_id: chatbotId, urls }),
+			method: 'PUT',
+			path,
+			body: { pages: urls },
+			slow: true,
+			pages: urls,
 			...(refused.length ? { refused } : {}),
 		};
 	},
-	'knowledge.addText': (f) =>
-		tool('add_text', {
-			chatbot_id: chatbotOf(f),
-			title: required(f.title, 'Title', 'Give the text a title.'),
-			content: required(f.content, 'Content', 'Give the text to add.'),
-		}),
-	'knowledge.addQa': (f) =>
-		tool('add_qa', {
-			chatbot_id: chatbotOf(f),
-			question: required(f.question, 'Question', 'Give the question a visitor may ask.'),
-			answer: required(f.answer, 'Answer', 'Give the answer the chatbot should give to it.'),
-		}),
-	'knowledge.remove': (f) =>
-		tool('remove_source', {
-			chatbot_id: chatbotOf(f),
+	'knowledge.addText': (f) => ({
+		method: 'PUT',
+		path: chatbotPath(f, '/sources'),
+		body: {
+			text: {
+				title: required(f.title, 'Title', 'Give the text a title.'),
+				content: required(f.content, 'Content', 'Give the text to add.'),
+			},
+		},
+		slow: true,
+	}),
+	'knowledge.addQa': (f) => ({
+		method: 'PUT',
+		path: chatbotPath(f, '/sources'),
+		body: {
+			qa: {
+				question: required(f.question, 'Question', 'Give the question a visitor may ask.'),
+				answer: required(f.answer, 'Answer', 'Give the answer the chatbot should give to it.'),
+			},
+		},
+		slow: true,
+	}),
+	'knowledge.remove': (f) => ({
+		method: 'DELETE',
+		path: chatbotPath(f, '/documents'),
+		qs: {
 			doc_id: required(
 				f.documentId,
 				'Source',
 				'Choose the source from the list, or give its ID: the doc_id that Get Many, Add Pages, Add Text or Add Q&A gives.',
 			),
+		},
+	}),
+	'conversation.getAll': (f) => ({
+		method: 'GET',
+		path: chatbotPath(f, '/conversations'),
+		qs: given<string>({
+			days: f.days === undefined ? undefined : String(f.days),
+			unanswered: flag(f.unanswered),
+			ratedDown: flag(f.ratedDown),
+			handedOff: flag(f.handedOff),
 		}),
-	'conversation.getAll': (f) =>
-		// Only the filters that are on: the tool reads a false one as no filter anyway.
-		tool('list_conversations', {
-			chatbot_id: chatbotOf(f),
-			days: f.days,
-			unanswered: f.unanswered || undefined,
-			rated_down: f.ratedDown || undefined,
-			handed_off: f.handedOff || undefined,
-		}),
-	'conversation.get': (f) =>
-		tool('get_conversation', {
-			chatbot_id: chatbotOf(f),
-			conversation_id: required(
-				f.conversationId,
-				'Conversation',
-				'Choose the conversation from the list, or give its ID: the id that Get Many gives.',
-			),
-		}),
-	'usage.get': () => tool('get_usage'),
+	}),
+	'conversation.get': (f) => {
+		const path = chatbotPath(f, '/conversations/');
+		const hint =
+			'Choose the conversation from the list, or give its ID: the id that Get Many gives.';
+		const id = required(f.conversationId, 'Conversation', hint);
+		return { method: 'GET', path: path + pathId(id, 'Conversation', hint) };
+	},
+	'usage.get': () => ({ method: 'GET', path: '/account/usage' }),
 };
 
 /** The node's operations, as `resource.operation`. */
 export const operations = Object.keys(OPERATIONS);
 
-/** The tool one of the node's operations calls, with its arguments. Fields left empty are not sent. */
-export function toolFor(resource: string, operation: string, f: Fields): ToolCall {
+/** The request one of the node's operations sends. Fields left empty are not sent. */
+export function requestFor(resource: string, operation: string, f: Fields): ApiRequest {
 	const make = OPERATIONS[`${resource}.${operation}`];
 	if (!make) throw new InputError(`This node has no operation "${operation}" for "${resource}".`);
 	return make(f);
 }
 
-/** The JSON-RPC message that calls a tool. */
-export const rpc = (call: ToolCall) => ({
-	jsonrpc: '2.0',
-	id: 1,
-	method: 'tools/call',
-	params: { name: call.name, arguments: call.arguments },
-});
+const isObject = (x: unknown): x is Record<string, unknown> =>
+	!!x && typeof x === 'object' && !Array.isArray(x);
 
-type Body = { error?: unknown; result?: { content?: { text?: unknown }[]; isError?: unknown } };
-
-/** A body as it came: n8n parses JSON bodies, but one sent as text is read here. */
+/** A body as it came: n8n parses JSON bodies, but text, such as a chat's stream or a plain refusal, is read here. */
 const read = (body: unknown): unknown => (typeof body === 'string' ? (json(body) ?? body) : body);
 
-/** The endpoint's words for a refusal, from a JSON-RPC error or a plain `{ error }`. */
-const said = (body: Body | null): string | null => {
-	const error = body?.error;
-	if (typeof error === 'string') return error;
-	if (
-		error &&
-		typeof error === 'object' &&
-		typeof (error as { message?: unknown }).message === 'string'
-	)
-		return (error as { message: string }).message;
+/** Whether a body is ChatFrom's own JSON `{ error }`, as the app answers a failure, rather than a gateway's page. */
+export const fromChatFrom = (raw: unknown): boolean => {
+	const body = read(raw);
+	return isObject(body) && typeof body.error === 'string';
+};
+
+/** The API's words for a refusal: `{ error }`, or the plain text the chat refuses in before its stream, never a web page. */
+const said = (body: unknown): string | null => {
+	if (isObject(body) && typeof body.error === 'string' && body.error) return body.error;
+	if (typeof body === 'string' && body.trim() && !body.trimStart().startsWith('<'))
+		return body.trim().slice(0, 500);
 	return null;
 };
 
 /**
- * A tool's answer, read from the endpoint's status and body: the JSON the tool
- * gave back, or a ChatFromError saying why there is none.
+ * The API's answer, read from its status and body: what it gave back, a chat's
+ * stream as its text, or a ChatFromError saying why there is none.
  */
-export function toolResult(status: number, raw: unknown, retryAfterHeader?: unknown): unknown {
-	const parsed = read(raw);
-	const body = parsed && typeof parsed === 'object' ? (parsed as Body) : null;
+export function answerOf(status: number, raw: unknown, retryAfterHeader?: unknown): unknown {
+	const body = read(raw);
 	if (status === 401)
 		throw new ChatFromError(
 			said(body) ??
@@ -471,68 +507,238 @@ export function toolResult(status: number, raw: unknown, retryAfterHeader?: unkn
 			retryAfterHeader !== undefined && Number.isFinite(header) ? header : undefined,
 		);
 	}
-	if (status < 200 || status > 299 || !body)
+	if (status === 404)
+		throw new ChatFromError(
+			"Not found. Check the ID, and that it is in this API key's account.",
+			404,
+		);
+	if (status < 200 || status > 299)
 		throw new ChatFromError(
 			said(body) ?? "Something went wrong on ChatFrom's side. Try again in a moment.",
 			status,
 		);
-	// A JSON-RPC error answered with 200, such as an unknown tool: no HTTP status to give.
-	if (body.error) throw new ChatFromError(said(body) ?? 'ChatFrom refused this.');
-	const text =
-		typeof body.result?.content?.[0]?.text === 'string' ? body.result.content[0].text : '';
-	if (body.result?.isError) {
-		// A tool that ran and failed: "Not found: …", "Refused (403): …", or, from ask_chatbot, its answer with an error.
-		const failed = json(text) as { error?: unknown } | undefined;
-		if (failed && typeof failed === 'object' && typeof failed.error === 'string')
-			throw new ChatFromError(failed.error);
-		if (/^Not found\b/.test(text)) {
-			// The routes mostly say just "Not found", which the tool prefixes with "Not found: " again.
-			const why = text.replace(/^Not found: /, '').replace(/\.$/, '') || 'Not found';
-			throw new ChatFromError(
-				`${why}. Check the ID, and that it is in this API key's account.`,
-				404,
-			);
-		}
-		const refused = /^Refused \((\d+)\): /.exec(text);
-		// The endpoint could not act as the key's owner for a moment, before running the tool: a 503, said as a tool error.
-		const signIn = /^ChatFrom could not sign in as this key's owner\b/.test(text);
-		throw new ChatFromError(
-			text.replace(/^Refused \(\d+\): /, '') || 'ChatFrom refused this.',
-			refused ? Number(refused[1]) : signIn ? 503 : undefined,
-		);
-	}
-	const answer = json(text);
-	if (answer === undefined) throw new ChatFromError(UNREADABLE);
-	return answer;
+	if (body === undefined || body === null || body === '') throw new ChatFromError(UNREADABLE);
+	return body;
 }
-
-const isObject = (x: unknown): x is Record<string, unknown> =>
-	!!x && typeof x === 'object' && !Array.isArray(x);
 
 const objects = (list: unknown): Record<string, unknown>[] => {
 	if (!Array.isArray(list) || !list.every(isObject)) throw new ChatFromError(UNREADABLE);
 	return list;
 };
 
+/** The value as JSON keeps it: no field left undefined. */
+const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
+
+const text = (v: unknown) => (typeof v === 'string' ? v : '');
+
 /**
- * A tool's answer to the call that asked for it, as the node's output items:
- * one per entry of a list or per page given, those not sent (ToolCall.refused)
- * in their places, else the answer itself. An answer of another shape than the
- * operation's says so, rather than giving back nothing.
+ * What a source an answer used is called, as ChatFrom calls it (sourceName in
+ * its libs/engine/types.ts): a page by its address, a document by its name.
  */
-export function itemsFrom(op: string, call: ToolCall, answer: unknown): Record<string, unknown>[] {
-	if (op.endsWith('.getAll')) return objects(answer);
-	if (op === 'knowledge.addPages') {
-		const items = [...objects(isObject(answer) ? answer.results : undefined)];
-		// One result per page sent, in its order: any other count would put the pages refused here in wrong places.
-		const sent = call.arguments.urls;
-		if (!Array.isArray(sent) || items.length !== sent.length) throw new ChatFromError(UNREADABLE);
-		for (const { at, url } of call.refused ?? [])
-			items.splice(at, 0, { url, ok: false, error: 'Not a web address' });
-		return items;
+const sourceName = (s: Record<string, unknown>): string => {
+	const source = text(s.source);
+	if (!/^(gdoc|notion|text|qa):/.test(source)) return source;
+	const named = text(s.filename).replace(/\.md$/i, '').trim();
+	if (named) return named;
+	const heading = text(s.heading).split(' > ')[0]?.trim();
+	if (source.startsWith('gdoc:')) return heading || 'Google Doc';
+	if (source.startsWith('notion:')) return heading || 'Notion page';
+	return source;
+};
+
+const source = (s: Record<string, unknown>) => {
+	const name = sourceName(s);
+	return {
+		source: s.source,
+		...(name !== s.source ? { name } : {}),
+		...(s.heading ? { heading: s.heading } : {}),
+		...(typeof s.page === 'number' ? { page: s.page } : {}),
+	};
+};
+
+const sources = (list: unknown) => (Array.isArray(list) ? list.filter(isObject).map(source) : []);
+
+/** The tools a chatbot has on, by the names the dashboard gives them, from its switches. */
+const TOOLS_ON: [string, string][] = [
+	['handoff', 'handoff_enabled'],
+	['memory', 'memory_enabled'],
+	['callbacks', 'callback_enabled'],
+	['shopify', 'shopify_enabled'],
+	['stripe', 'stripe_enabled'],
+	['sheets', 'sheets_enabled'],
+	['cal', 'cal_enabled'],
+	['calendly', 'calendly_enabled'],
+	['hubspot', 'hubspot_enabled'],
+];
+
+/** A chatbot as Get gives it: its settings, the tools it has on, and where it can be put. */
+const chatbot = (a: Record<string, unknown>) => {
+	const id = text(a.id);
+	return plain({
+		id: a.id,
+		name: a.name,
+		status: a.status,
+		model: a.answer_model,
+		language: a.language,
+		instructions: a.system_prompt,
+		welcome_message: a.welcome_message,
+		suggested_questions: a.suggested_questions,
+		fallback_message: a.fallback_message,
+		tone: a.tone,
+		detail: a.detail,
+		allowed_domains: a.allowed_domains,
+		workflow: a.workflow ? 'custom' : 'default',
+		handoff_email: a.handoff_email,
+		guardrails: a.guardrails,
+		tools_on: TOOLS_ON.filter(([, on]) => a[on]).map(([name]) => name),
+		embed_snippet: `<script src="${ORIGIN}/w.js" data-bot="${id}" defer></script>`,
+		share_link: `${ORIGIN}/c/${id}`,
+		dashboard: `${ORIGIN}/dashboard/${id}`,
+	});
+};
+
+/** A knowledge source as Get Many and the adding operations give it. */
+const document = (d: Record<string, unknown>) =>
+	plain({
+		doc_id: d.doc_id,
+		name: d.filename,
+		status: d.status,
+		chunks: d.chunk_count,
+		bytes: d.size_bytes,
+		error: d.error,
+		updated_at: d.updated_at,
+	});
+
+/** A conversation as Get Many lists it. */
+const conversation = (c: Record<string, unknown>) =>
+	plain({
+		id: c.id,
+		title: c.title,
+		channel: c.channel,
+		messages: c.message_count,
+		unanswered: c.unanswered,
+		handed_off: c.handed_off,
+		rating: c.rating,
+		updated_at: c.updated_at,
+	});
+
+/** A conversation as Get gives it, message by message, each named for who wrote it: an agent reads a "user" message as its own user's words. */
+const thread = (found: unknown) => {
+	if (!isObject(found) || !isObject(found.conversation)) throw new ChatFromError(UNREADABLE);
+	const c = found.conversation;
+	return plain({
+		id: c.id,
+		title: c.title,
+		channel: c.channel,
+		handed_off: c.handed_off,
+		messages: objects(found.messages).map((m) => ({
+			role: m.role === 'user' ? 'visitor' : 'chatbot',
+			content: m.content,
+			sources: sources(m.sources),
+			rating: m.rating,
+			...(m.feedback ? { feedback: m.feedback } : {}),
+			at: m.created_at,
+		})),
+	});
+};
+
+/** A chat's stream, as ChatFrom sends it, frame by frame: the JSON of a frame's `data:` lines, each frame ended by a blank line. */
+const frames = (stream: string) =>
+	stream
+		.replace(/\r\n?/g, '\n')
+		.split('\n\n')
+		.map((frame) =>
+			frame
+				.split('\n')
+				.filter((l) => l.startsWith('data:'))
+				.map((l) => l.slice(5).trim())
+				.join('\n'),
+		)
+		.filter(Boolean)
+		.map(json)
+		.filter(isObject);
+
+/**
+ * A chat's stream read whole, as the dashboard's playground shows it: the
+ * answer, the sources it used, a question a workflow step asks back, and the
+ * conversation's id. A turn that failed after it began says why.
+ */
+const turn = (stream: unknown, conversationId: unknown) => {
+	if (typeof stream !== 'string') throw new ChatFromError(UNREADABLE);
+	let answer = '';
+	let used: unknown[] = [];
+	let question: Record<string, unknown> | null = null;
+	let error: string | null = null;
+	for (const e of frames(stream)) {
+		if (e.type === 'token' && typeof e.text === 'string') answer += e.text;
+		else if (e.type === 'retrieval' && Array.isArray(e.sources)) used = e.sources;
+		else if (e.type === 'input_required')
+			question = Object.fromEntries(Object.entries(e).filter(([k]) => k !== 'type'));
+		else if (e.type === 'error')
+			error = typeof e.message === 'string' && e.message ? e.message : 'The answer failed';
 	}
-	if (!isObject(answer)) throw new ChatFromError(UNREADABLE);
-	return [answer];
+	if (error) throw new ChatFromError(error);
+	return {
+		answer: answer.trim(),
+		sources: sources(used),
+		...(question ? { question } : {}),
+		conversation_id: typeof conversationId === 'string' && conversationId ? conversationId : null,
+	};
+};
+
+/**
+ * The API's answer to the request that asked for it, as the node's output
+ * items: one per entry of a list or per page given, those not sent
+ * (ApiRequest.refused) in their places, else the answer itself. A chat's
+ * stream is read whole, with the conversation's id from its X-Conversation-Id
+ * header. An answer of another shape than the operation's says so, rather than
+ * giving back nothing.
+ */
+export function itemsFrom(
+	op: string,
+	request: ApiRequest,
+	answer: unknown,
+	conversationId?: unknown,
+): Record<string, unknown>[] {
+	switch (op) {
+		case 'chatbot.getAll':
+			return objects(answer).map((a) =>
+				plain({
+					id: a.id,
+					name: a.name,
+					status: a.status,
+					model: a.answer_model,
+					language: a.language,
+				}),
+			);
+		case 'chatbot.get':
+			if (!isObject(answer)) throw new ChatFromError(UNREADABLE);
+			return [chatbot(answer)];
+		case 'chatbot.ask':
+			return [turn(answer, conversationId)];
+		case 'knowledge.getAll':
+			return objects(answer).map(document);
+		case 'knowledge.addText':
+		case 'knowledge.addQa':
+			if (!isObject(answer)) throw new ChatFromError(UNREADABLE);
+			return [document(answer)];
+		case 'knowledge.addPages': {
+			const items = [...objects(isObject(answer) ? answer.results : undefined)];
+			// One result per page sent, in its order: any other count would put the pages refused here in wrong places.
+			if (!request.pages || items.length !== request.pages.length)
+				throw new ChatFromError(UNREADABLE);
+			for (const { at, url } of request.refused ?? [])
+				items.splice(at, 0, { url, ok: false, error: 'Not a web address' });
+			return items;
+		}
+		case 'conversation.getAll':
+			return objects(answer).slice(0, CONVERSATIONS_MAX).map(conversation);
+		case 'conversation.get':
+			return [thread(answer)];
+		default:
+			if (!isObject(answer)) throw new ChatFromError(UNREADABLE);
+			return [answer];
+	}
 }
 
 /** A chatbot cut to the fields that matter most, for Get with Simplify on. */

@@ -2,8 +2,8 @@ import type { INodeProperties } from 'n8n-workflow';
 import { CONVERSATIONS_MAX, PAGES_MAX } from './client';
 
 // The node's parameters: a resource, its operation, then the fields that
-// operation reads. Each operation is one tool of ChatFrom's agent endpoint
-// (client.ts, toolFor).
+// operation reads. Each operation is one request to ChatFrom's REST API
+// (client.ts, requestFor).
 
 /** The chatbot an operation works on, picked from the account's list or given by its ID. */
 const chatbot = (show: Record<string, string[]>): INodeProperties => ({
@@ -157,7 +157,7 @@ export const properties: INodeProperties[] = [
 				type: 'string',
 				default: '',
 				description:
-					'The conversation_id an earlier answer gave, to ask a follow-up in the same conversation',
+					"The conversation_id an earlier Ask gave, to ask a follow-up in the same conversation. Not a visitor's conversation from Get Many: the question would be added to it as if the visitor wrote it.",
 			},
 			{
 				displayName: 'Thread ID',
@@ -303,7 +303,7 @@ export const properties: INodeProperties[] = [
 		searchListMethod: 'searchConversations',
 		show: { resource: ['conversation'], operation: ['get'] },
 	}),
-	// The tool gives back the newest 50 at most (the operation's description says so), so there is no Return All here.
+	// Get Many gives the newest 50 at most, the node's own cap (CONVERSATIONS_MAX, as 0.1.0 gave), so there is no Return All here.
 	{
 		displayName: 'Limit',
 		name: 'limit',

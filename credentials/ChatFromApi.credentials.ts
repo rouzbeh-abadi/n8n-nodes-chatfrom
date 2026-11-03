@@ -5,7 +5,7 @@ import type {
 	ICredentialType,
 	INodeProperties,
 } from 'n8n-workflow';
-import { ENDPOINT } from '../nodes/ChatFrom/client';
+import { API } from '../nodes/ChatFrom/client';
 
 export class ChatFromApi implements ICredentialType {
 	name = 'chatFromApi';
@@ -46,12 +46,12 @@ export class ChatFromApi implements ICredentialType {
 		},
 	};
 
-	// Listing the tools needs a right key and costs no credits.
+	// Reading the month's usage needs a right key and costs no credits. Like any of the node's requests, it is
+	// answered as the key's owner, so ChatFrom signs in as them first if it has not lately.
 	test: ICredentialTestRequest = {
 		request: {
-			url: ENDPOINT,
-			method: 'POST',
-			body: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+			url: `${API}/account/usage`,
+			method: 'GET',
 			// As the node's own calls: a redirect would be followed with the key.
 			disableFollowRedirect: true,
 			sendCredentialsOnCrossOriginRedirect: false,
@@ -63,6 +63,21 @@ export class ChatFromApi implements ICredentialType {
 					value: 401,
 					message:
 						'ChatFrom does not know this API key. Make one in ChatFrom under Account, API keys; it starts with cf_.',
+				},
+			},
+			{
+				type: 'responseCode',
+				properties: {
+					value: 403,
+					message:
+						'This ChatFrom account is blocked from signing in, so its API keys are too. Contact ChatFrom support.',
+				},
+			},
+			{
+				type: 'responseCode',
+				properties: {
+					value: 503,
+					message: 'ChatFrom could not check this key just now. Try again in a minute.',
 				},
 			},
 			{
