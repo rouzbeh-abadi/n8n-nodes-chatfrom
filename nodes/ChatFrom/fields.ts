@@ -1,5 +1,5 @@
 import type { INodeProperties } from 'n8n-workflow';
-import { CONVERSATIONS_MAX, PAGES_MAX } from './client';
+import { PAGES_MAX } from './client';
 
 // The node's parameters: a resource, its operation, then the fields that
 // operation reads. Each operation is one request to ChatFrom's REST API
@@ -105,14 +105,14 @@ export const properties: INodeProperties[] = [
 				name: 'Ask',
 				value: 'ask',
 				description: 'Ask a chatbot a question and get its answer with the sources it used',
-				action: 'Ask a chatbot',
+				action: 'Ask chatbot',
 			},
 			{
 				name: 'Get',
 				value: 'get',
 				description:
-					"Get a chatbot's name, status, model, embed snippet and share link; with Simplify off, its instructions and every setting too",
-				action: 'Get a chatbot',
+					"Get a chatbot's name, status, model, embed snippet and share link; with 'Simplify' off, its instructions and every setting too",
+				action: 'Get chatbot',
 			},
 			{
 				name: 'Get Many',
@@ -157,7 +157,7 @@ export const properties: INodeProperties[] = [
 				type: 'string',
 				default: '',
 				description:
-					"The conversation_id an earlier Ask gave, to ask a follow-up in the same conversation. Not a visitor's conversation from Get Many: the question would be added to it as if the visitor wrote it.",
+					"The 'conversation_id' an earlier Ask gave, to ask a follow-up in the same conversation. Not a visitor's conversation from Get Many: the question would be added to it as if the visitor wrote it.",
 			},
 			{
 				displayName: 'Thread ID',
@@ -165,7 +165,7 @@ export const properties: INodeProperties[] = [
 				type: 'string',
 				default: '',
 				description:
-					"When the last answer asked a question of its own (a step of the chatbot's workflow waiting for input), its thread_id. The message is then the reply to it. Send the same Conversation ID too.",
+					"When the last answer asked a question of its own (a step of the chatbot's workflow waiting for input), its 'thread_id'. The message is then the reply to it. Send the same 'Conversation ID' too.",
 			},
 		],
 	},
@@ -183,19 +183,19 @@ export const properties: INodeProperties[] = [
 				name: 'Add Pages',
 				value: 'addPages',
 				description: "Add web pages to a chatbot's knowledge. ChatFrom reads each page itself.",
-				action: 'Add pages to a chatbot',
+				action: 'Add pages to chatbot',
 			},
 			{
 				name: 'Add Q&A',
 				value: 'addQa',
 				description: 'Add a question with the exact answer the chatbot should give to it',
-				action: 'Add a question and answer to a chatbot',
+				action: 'Add Q&A to chatbot',
 			},
 			{
 				name: 'Add Text',
 				value: 'addText',
 				description: "Add a text to a chatbot's knowledge, such as opening hours or a policy",
-				action: 'Add a text to a chatbot',
+				action: 'Add text to chatbot',
 			},
 			{
 				name: 'Get Many',
@@ -207,7 +207,7 @@ export const properties: INodeProperties[] = [
 				name: 'Remove',
 				value: 'remove',
 				description: "Remove one source from a chatbot's knowledge",
-				action: 'Remove a knowledge source',
+				action: 'Remove knowledge source',
 			},
 		],
 		default: 'addPages',
@@ -265,7 +265,7 @@ export const properties: INodeProperties[] = [
 		displayName: 'Source',
 		name: 'documentId',
 		description:
-			'The source to remove. Its ID is the doc_id that Get Many, Add Pages, Add Text or Add Q&A gives.',
+			"The source to remove. Its ID is the 'doc_id' that Get Many, Add Pages, Add Text or Add Q&A gives.",
 		searchListMethod: 'searchSources',
 		show: { resource: ['knowledge'], operation: ['remove'] },
 	}),
@@ -283,12 +283,12 @@ export const properties: INodeProperties[] = [
 				name: 'Get',
 				value: 'get',
 				description: 'Get one conversation, message by message, with the sources each answer used',
-				action: 'Get a conversation',
+				action: 'Get conversation',
 			},
 			{
 				name: 'Get Many',
 				value: 'getAll',
-				description: `List a chatbot's conversations from every channel, newest first: up to ${CONVERSATIONS_MAX}, from the last 7 days unless Days says otherwise`,
+				description: "List a chatbot's conversations from every channel, newest first, from the last 7 days unless 'Days' says otherwise",
 				action: 'Get many conversations',
 			},
 		],
@@ -303,16 +303,7 @@ export const properties: INodeProperties[] = [
 		searchListMethod: 'searchConversations',
 		show: { resource: ['conversation'], operation: ['get'] },
 	}),
-	// Get Many gives the newest 50 at most, the node's own cap (CONVERSATIONS_MAX, as 0.1.0 gave), so there is no Return All here.
-	{
-		displayName: 'Limit',
-		name: 'limit',
-		type: 'number',
-		typeOptions: { minValue: 1, maxValue: CONVERSATIONS_MAX },
-		default: 50,
-		description: 'Max number of results to return',
-		displayOptions: { show: { resource: ['conversation'], operation: ['getAll'] } },
-	},
+	...listing('conversation'),
 	{
 		displayName: 'Filters',
 		name: 'filters',
@@ -366,7 +357,7 @@ export const properties: INodeProperties[] = [
 				value: 'get',
 				description:
 					"Get the credits used this month against the plan's allowance, and when it starts again",
-				action: 'Get the account usage',
+				action: 'Get account usage',
 			},
 		],
 		default: 'get',

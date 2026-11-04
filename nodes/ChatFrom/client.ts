@@ -10,8 +10,11 @@ export const API = `${ORIGIN}/api`;
 /** The most pages one request adds, as many as the route takes at once: the node stops an item with more before sending it, which the route would refuse whole. */
 export const PAGES_MAX = 60;
 
-/** The most conversations Get Many gives back: the newest, from the last 7 days unless Days says otherwise. */
-export const CONVERSATIONS_MAX = 50;
+/**
+ * The conversations Get Many asks for in one call. With Return All, or a Limit past it, it asks again for the ones
+ * after the last it got, until a page comes back short: ChatFrom's route reads `limit`, `after` and `after_id`.
+ */
+export const CONVERSATIONS_PAGE = 500;
 
 /** The longest wait the node sits out before asking again, when ChatFrom says how long to wait. */
 export const RETRY_MAX_S = 60;
@@ -442,6 +445,7 @@ const OPERATIONS: Record<string, (f: Fields) => ApiRequest> = {
 		path: chatbotPath(f, '/conversations'),
 		qs: given<string>({
 			days: f.days === undefined ? undefined : String(f.days),
+			limit: String(CONVERSATIONS_PAGE),
 			unanswered: flag(f.unanswered),
 			ratedDown: flag(f.ratedDown),
 			handedOff: flag(f.handedOff),
@@ -619,6 +623,7 @@ const conversation = (c: Record<string, unknown>) =>
 		unanswered: c.unanswered,
 		handed_off: c.handed_off,
 		rating: c.rating,
+		last_message_at: c.last_message_at,
 		updated_at: c.updated_at,
 	});
 
@@ -675,7 +680,7 @@ const turn = (stream: unknown, conversationId: unknown) => {
 		else if (e.type === 'input_required')
 			question = Object.fromEntries(Object.entries(e).filter(([k]) => k !== 'type'));
 		else if (e.type === 'error')
-			error = typeof e.message === 'string' && e.message ? e.message : 'The answer failed';
+			error = typeof e.message === 'string' && e.message ? e.message : 'ChatFrom stopped before the answer was finished. Try again in a moment.';
 	}
 	if (error) throw new ChatFromError(error);
 	return {
@@ -732,12 +737,45 @@ export function itemsFrom(
 			return items;
 		}
 		case 'conversation.getAll':
-			return objects(answer).slice(0, CONVERSATIONS_MAX).map(conversation);
+			return objects(answer).map(conversation);
 		case 'conversation.get':
 			return [thread(answer)];
 		default:
 			if (!isObject(answer)) throw new ChatFromError(UNREADABLE);
 			return [answer];
+	}
+}
+
+/**
+ * Get Many's conversations, page after page: each call asks for as many as are still wanted, up to a page, after the
+ * last conversation the call before gave, by its `last_message_at` and `id`, until a page comes back short or `max`
+ * are in, and never more than `max`. One seen twice is kept once, and a page that adds none ends it, so a ChatFrom
+ * that ignores `after` or `limit` cannot keep it asking. `beforeNextPage` runs before each page after the first, and
+ * stops the reading by throwing, as when the run is stopped.
+ */
+export async function allConversations(
+	request: ApiRequest,
+	call: (page: ApiRequest) => Promise<unknown>,
+	max = Infinity,
+	beforeNextPage: () => void = () => {},
+): Promise<Record<string, unknown>[]> {
+	const kept = new Map<unknown, Record<string, unknown>>();
+	for (let qs = request.qs; ; ) {
+		if (qs !== request.qs) beforeNextPage();
+		const size = Math.min(CONVERSATIONS_PAGE, max - kept.size);
+		const rows = objects(await call({ ...request, qs: { ...qs, limit: String(size) } }));
+		const before = kept.size;
+		for (const row of rows) if (!kept.has(row.id)) kept.set(row.id, row);
+		const last = rows[rows.length - 1];
+		if (
+			rows.length < size ||
+			kept.size === before ||
+			kept.size >= max ||
+			typeof last?.last_message_at !== 'string' ||
+			typeof last.id !== 'string'
+		)
+			return [...kept.values()].slice(0, max);
+		qs = { ...request.qs, after: last.last_message_at, after_id: last.id };
 	}
 }
 

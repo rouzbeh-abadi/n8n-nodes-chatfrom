@@ -38,7 +38,7 @@ Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes
 **Conversation**
 
 - **Get**: one conversation, message by message, picked from the chatbot's recent ones or given by its ID.
-- **Get Many**: a chatbot's conversations from every channel, newest first, with filters for those it could not answer, those rated down and those passed to a person. It gives back the newest 50 at most, from the last 7 days unless you set **Days**.
+- **Get Many**: a chatbot's conversations from every channel, newest first, with filters for those it could not answer, those rated down and those passed to a person. **Return All** gives every one, and otherwise **Limit** says how many of the newest, from the last 7 days unless you set **Days**. The node reads them 500 at a time.
 
 **Usage**
 

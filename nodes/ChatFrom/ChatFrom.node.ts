@@ -18,6 +18,7 @@ import {
 	sleep,
 } from 'n8n-workflow';
 import {
+	allConversations,
 	answerOf,
 	API,
 	ChatFromError,
@@ -46,8 +47,9 @@ import { properties } from './fields';
 const SLOW_MS = 130_000;
 const CALL_MS = 30_000;
 
-/** How far back the conversation picker looks: the newest 50 of these days. */
+/** How far back the conversation picker looks, and how many of the newest of those days it lists. */
 const PICKER_DAYS = 30;
+const PICKER_SHOWN = 50;
 
 /** The operations whose output holds text others wrote: visitors' messages, answers, page titles, document names. */
 const OUTSIDERS_IN = new Set([
@@ -214,7 +216,7 @@ function fieldsOf(ctx: IExecuteFunctions, resource: string, operation: string, i
 			if (filters.days !== undefined && filters.days !== null && filters.days !== '') {
 				const days = Number(filters.days);
 				if (!Number.isFinite(days) || days < 1)
-					throw new NodeOperationError(ctx.getNode(), 'Days must be a number of days, 1 or more.', {
+					throw new NodeOperationError(ctx.getNode(), "The 'Days' filter must be a number of days, 1 or more.", {
 						itemIndex: i,
 					});
 				f.days = days;
@@ -226,6 +228,20 @@ function fieldsOf(ctx: IExecuteFunctions, resource: string, operation: string, i
 		}
 	}
 	return f;
+}
+
+/**
+ * A Get Many's Limit, checked: an expression can give 0, 2.5 or a word, which no list has, and the route would refuse
+ * it in its own terms. A whole number written as text, as an expression often gives one, is read as that number.
+ */
+function limitOf(ctx: IExecuteFunctions, i: number): number {
+	const given = ctx.getNodeParameter('limit', i, 50) as unknown;
+	const limit = typeof given === 'string' && given.trim() !== '' ? Number(given) : given;
+	if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1)
+		throw new NodeOperationError(ctx.getNode(), "The 'Limit' must be a whole number, 1 or more.", {
+			itemIndex: i,
+		});
+	return limit;
 }
 
 /**
@@ -242,8 +258,7 @@ function itemsOf(
 	let items = itemsFrom(op, request, answered.answer, answered.conversationId) as IDataObject[];
 	if (op === 'chatbot.get' && ctx.getNodeParameter('simplify', i, true))
 		items = items.map((c) => simplified(c) as IDataObject);
-	if (op.endsWith('.getAll') && !ctx.getNodeParameter('returnAll', i, false))
-		items = items.slice(0, ctx.getNodeParameter('limit', i, 50) as number);
+	if (op.endsWith('.getAll') && !ctx.getNodeParameter('returnAll', i, false)) items = items.slice(0, limitOf(ctx, i));
 	// Once, first, on the first item: the agent reads it before the text, and a list of fifty does not carry it fifty times.
 	if (ctx.getNode().type.endsWith('Tool') && OUTSIDERS_IN.has(op) && items.length)
 		items[0] = { note: OUTSIDERS, ...items[0] };
@@ -255,10 +270,12 @@ async function listed(
 	ctx: ILoadOptionsFunctions,
 	op: string,
 	fields: Fields,
+	qs: Record<string, string> = {},
 ): Promise<Record<string, unknown>[]> {
 	const [resource, operation] = op.split('.');
 	try {
-		const request = requestFor(resource, operation, fields);
+		const made = requestFor(resource, operation, fields);
+		const request = { ...made, qs: { ...made.qs, ...qs } };
 		const answered = await callOnce.call(ctx, request);
 		return itemsFrom(op, request, answered.answer, answered.conversationId);
 	} catch (error) {
@@ -332,11 +349,11 @@ export class ChatFrom implements INodeType {
 			): Promise<INodeListSearchResult> {
 				const chatbotId = chosenChatbot(this);
 				if (!chatbotId) return { results: [] };
-				const list = await listed(this, 'conversation.getAll', { chatbotId, days: PICKER_DAYS });
+				const list = await listed(this, 'conversation.getAll', { chatbotId, days: PICKER_DAYS }, { limit: String(PICKER_SHOWN) });
 				return matching(
 					list.map((c) => {
 						// The channel and the day, of those it has, to tell apart conversations that began alike.
-						const about = [asText(c.channel), asText(c.updated_at).slice(0, 10)]
+						const about = [asText(c.channel), asText(c.last_message_at ?? c.updated_at).slice(0, 10)]
 							.filter(Boolean)
 							.join(', ');
 						const title = asText(c.title) || 'Untitled';
@@ -354,7 +371,13 @@ export class ChatFrom implements INodeType {
 		// Each item is a call of its own. Once ChatFrom has refused the key, the rest are not sent: they would be
 		// refused too, and wrong keys are counted against this n8n's address, which other accounts may share.
 		let keyRefused: string | undefined;
+		const signal = this.getExecutionCancelSignal?.();
 		for (let i = 0; i < items.length; i++) {
+			// A stopped run sends nothing more, Continue On Fail or not.
+			if (signal?.aborted)
+				throw new NodeOperationError(this.getNode(), 'The run was stopped before this item was sent.', {
+					itemIndex: i,
+				});
 			if (keyRefused !== undefined) {
 				out.push({ json: { error: keyRefused }, pairedItem: { item: i } });
 				continue;
@@ -363,8 +386,29 @@ export class ChatFrom implements INodeType {
 				const resource = this.getNodeParameter('resource', i) as string;
 				const operation = this.getNodeParameter('operation', i) as string;
 				const request = requestFor(resource, operation, fieldsOf(this, resource, operation, i));
-				const answered = await callApi.call(this, request);
-				const data = itemsOf(this, `${resource}.${operation}`, i, request, answered);
+				const op = `${resource}.${operation}`;
+				const all = op.endsWith('.getAll') && (this.getNodeParameter('returnAll', i, false) as boolean);
+				const limit = op.endsWith('.getAll') && !all ? limitOf(this, i) : Infinity;
+				// Conversations come page by page, as many as Return All or the Limit asks for; a stopped run asks for no more.
+				const answered: Answered =
+					op === 'conversation.getAll'
+						? {
+								answer: await allConversations(
+									request,
+									async (page) => (await callApi.call(this, page)).answer,
+									limit,
+									() => {
+										if (signal?.aborted)
+											throw new NodeOperationError(
+												this.getNode(),
+												'The run was stopped before ChatFrom was asked for the next conversations.',
+												{ itemIndex: i },
+											);
+									},
+								),
+							}
+						: await callApi.call(this, request);
+				const data = itemsOf(this, op, i, request, answered);
 				out.push(
 					...this.helpers.constructExecutionMetaData(this.helpers.returnJsonArray(data), {
 						itemData: { item: i },

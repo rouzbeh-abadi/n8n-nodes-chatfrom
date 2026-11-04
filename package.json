@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-chatfrom",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Ask your ChatFrom AI chatbots, add pages, texts and Q&As to their knowledge, and read their conversations from n8n.",
 	"license": "MIT",
 	"homepage": "https://chatfrom.io",
